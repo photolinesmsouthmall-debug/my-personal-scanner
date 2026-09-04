@@ -34,7 +34,7 @@
         <label>Personal Access Token (PAT):</label>
         <input type="password" id="gh-token" placeholder="ghp_xxxxxxxxxxxx">
         
-        <button class="btn" style="width:100%; padding:8px;" onclick="saveConfig()">Save GitHub Config</button>
+        <button class="btn" style="width:100%; padding:8px;" onclick="saveConfig()">Save Settings</button>
     </div>
 
     <div id="video-container">
@@ -81,7 +81,7 @@
             localStorage.setItem('gh_owner', document.getElementById('gh-owner').value.trim());
             localStorage.setItem('gh_repo', document.getElementById('gh-repo').value.trim());
             localStorage.setItem('gh_token', document.getElementById('gh-token').value.trim());
-            alert('GitHub settings saved locally!');
+            alert('GitHub credentials saved locally!');
         }
 
         async function initOCR() {
@@ -128,13 +128,11 @@
         }
 
         function parseText(text) {
-            // 1. Receipt # Detection (#0000110968 or 0000110968)
+            // 1. RECEIPT NUMBER (Pads leading zeros to match 10-digit standard e.g. #0000110968)
             let receiptNo = null;
-            const fullMatch = text.match(/#?\s*(000\d{7})/);
-            if (fullMatch) receiptNo = "#" + fullMatch[1];
-            else {
-                const altMatch = text.match(/#\s*(\d{6,10})/);
-                if (altMatch) receiptNo = altMatch[0];
+            const matchDigits = text.match(/#?\s*0*(\d{5,7})/);
+            if (matchDigits && matchDigits[1]) {
+                receiptNo = "#" + matchDigits[1].padStart(10, '0');
             }
 
             if (receiptNo) {
@@ -143,33 +141,54 @@
                     return;
                 }
 
-                // 2. Customer Name Detection (Handles SN#:808901 - TRESMARIAS)
+                // 2. CUSTOMER NAME (Fixes truncated short names like MIN/HIN/NIN)
                 let customerName = "UNKNOWN";
-                const snMatch = text.match(/SN[#H:]?\s*[A-Z0-9]+\s*[-:\s]+\s*([A-Za-z\s]{3,20})/i);
+                let cleanedText = text.replace(/S[NH1lI][#H:]?/gi, 'SN#:');
+                
+                const snMatch = cleanedText.match(/SN#:\s*[A-Z0-9]*\s*[-:\s]+\s*([A-Za-z\s]{3,30})/i);
                 if (snMatch && snMatch[1]) {
-                    customerName = snMatch[1].replace(/[^A-Za-z\s]/g, '').trim();
-                } else {
+                    let extracted = snMatch[1].replace(/[^A-Za-z\s]/g, '').trim();
+                    if (!/TOTAL|SUB|CASH|PRICE|AMOUNT|CHANGE|VAT/i.test(extracted) && extracted.length >= 3) {
+                        customerName = extracted;
+                    }
+                }
+
+                if (customerName === "UNKNOWN") {
                     const lines = text.split('\n');
                     for (let line of lines) {
                         if (/SN/i.test(line)) {
-                            let namePart = line.replace(/.*SN[#H:]?\s*[A-Z0-9]{5,8}\s*[-:\s]*/i, '').trim();
-                            namePart = namePart.replace(/[^A-Za-z\s]/g, '').trim();
-                            if (namePart.length >= 3 && !/TOTAL|SUB|CASH|PRICE|AMOUNT/i.test(namePart)) {
-                                customerName = namePart;
-                                break;
+                            let parts = line.split(/[-:]/);
+                            if (parts.length > 1) {
+                                let candidate = parts[parts.length - 1].replace(/[^A-Za-z\s]/g, '').trim();
+                                if (candidate.length >= 3 && !/TOTAL|SUB|CASH|PRICE|AMOUNT/i.test(candidate)) {
+                                    customerName = candidate;
+                                    break;
+                                }
                             }
                         }
                     }
                 }
 
-                // 3. Amount Detection (SUB-TOTAL priority)
+                // 3. AMOUNT FIX (Preserves decimals or restores missing decimal points)
                 let amount = 0.00;
                 const subTotalMatch = text.match(/SUB-?\s*TOTAL\s*[:=]?\s*([\d,]+\.\d{2})/i);
                 if (subTotalMatch && subTotalMatch[1]) {
                     amount = parseFloat(subTotalMatch[1].replace(',', ''));
                 } else {
-                    const allAmounts = text.match(/[\d,]+\.\d{2}/g);
-                    if (allAmounts && allAmounts.length > 0) amount = parseFloat(allAmounts[allAmounts.length - 1].replace(',', ''));
+                    const decimalAmounts = text.match(/\b\d+[\.,]\d{2}\b/g);
+                    if (decimalAmounts && decimalAmounts.length > 0) {
+                        let lastVal = decimalAmounts[decimalAmounts.length - 1].replace(',', '.');
+                        amount = parseFloat(lastVal);
+                    } else {
+                        const rawNumbers = text.match(/\b\d{3,6}\b/g);
+                        if (rawNumbers && rawNumbers.length > 0) {
+                            let rawStr = rawNumbers[rawNumbers.length - 1];
+                            if (rawStr.length >= 3) {
+                                let formatted = rawStr.slice(0, -2) + "." + rawStr.slice(-2);
+                                amount = parseFloat(formatted);
+                            }
+                        }
+                    }
                 }
 
                 scannedReceipts.add(receiptNo);
@@ -184,7 +203,7 @@
                 scannedDataList.push(record);
                 logData(receiptNo, customerName, amount);
                 
-                statusText.innerText = `Scanned ${receiptNo}! Saving to GitHub CSV...`;
+                statusText.innerText = `Scanned ${receiptNo}! Saving to GitHub...`;
                 statusText.style.color = "#00ffcc";
 
                 saveToGitHubCSV(scannedDataList);
@@ -204,12 +223,11 @@
             const token = localStorage.getItem('gh_token');
 
             if (!owner || !repo || !token) {
-                statusText.innerText = "Please enter and save your GitHub credentials above!";
+                statusText.innerText = "Saved locally. Add GitHub token to sync to repo!";
                 statusText.style.color = "#ffcc00";
                 return;
             }
 
-            // Convert array of objects to Excel-ready CSV format
             let csvContent = "Timestamp,Receipt No,Customer Name,Amount\n";
             dataList.forEach(row => {
                 csvContent += `"${row.timestamp}","${row.receiptNo}","${row.customerName}","${row.amount}"\n`;
@@ -244,7 +262,7 @@
                     statusText.innerText = `Saved ${dataList[dataList.length - 1].receiptNo} to scanned_receipts.csv in GitHub!`;
                     statusText.style.color = "#00ff00";
                 } else {
-                    statusText.innerText = "GitHub save failed. Verify your token permissions.";
+                    statusText.innerText = "GitHub save failed. Check token permissions.";
                     statusText.style.color = "#ff3333";
                 }
             } catch (err) {
