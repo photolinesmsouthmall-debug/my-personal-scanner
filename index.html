@@ -1,117 +1,5 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>In-Browser Receipt Scanner</title>
-    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-    <style>
-        body { font-family: Arial, sans-serif; text-align: center; background: #121212; color: #fff; margin: 0; padding: 20px; }
-        #video-container { position: relative; display: inline-block; width: 100%; max-width: 400px; margin-top: 10px; }
-        video { width: 100%; border-radius: 12px; border: 3px solid #333; background: #000; }
-        #overlay { position: absolute; top: 10%; left: 10%; width: 80%; height: 80%; border: 2px dashed #00ffcc; pointer-events: none; }
-        #status { font-size: 18px; font-weight: bold; margin-top: 15px; color: #00ffcc; }
-        .btn { padding: 12px 24px; font-size: 16px; background-color: #00ffcc; color: #121212; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 10px; }
-        #log-table { width: 100%; max-width: 500px; margin: 20px auto; border-collapse: collapse; background: #1e1e1e; border-radius: 8px; overflow: hidden; }
-        #log-table th, #log-table td { padding: 10px; border-bottom: 1px solid #333; text-align: left; font-size: 14px; }
-        #log-table th { background: #2a2a2a; color: #00ffcc; }
-    </style>
-</head>
-<body>
-
-    <h2>Offline Receipt Scanner</h2>
-    <p>Runs entirely in your browser with zero server delay.</p>
-
-    <div id="video-container">
-        <video id="webcam" autoplay playsinline muted></video>
-        <div id="overlay"></div>
-    </div>
-
-    <br>
-    <button id="cam-btn" class="btn" onclick="startCamera()">Start Camera</button>
-
-    <div id="status">Click "Start Camera" to begin.</div>
-
-    <table id="log-table">
-        <thead>
-            <tr>
-                <th>Receipt #</th>
-                <th>Customer</th>
-                <th>Amount</th>
-            </tr>
-        </thead>
-        <tbody id="log-body">
-            <!-- Scanned records populate here -->
-        </tbody>
-    </table>
-
-    <canvas id="canvas" style="display:none;"></canvas>
-
-    <script>
-        const video = document.getElementById('webcam');
-        const canvas = document.getElementById('canvas');
-        const statusText = document.getElementById('status');
-        const camBtn = document.getElementById('cam-btn');
-        const logBody = document.getElementById('log-body');
-
-        let isProcessing = false;
-        let worker = null;
-        let scannedReceipts = new Set();
-        let customerBalances = {};
-
-        async function initOCR() {
-            statusText.innerText = "Loading OCR Engine...";
-            worker = await Tesseract.createWorker('eng');
-            statusText.innerText = "Ready! Click 'Start Camera'.";
-        }
-        initOCR();
-
-        async function startCamera() {
-            if (!worker) {
-                alert("OCR engine is still loading. Please wait a moment.");
-                return;
-            }
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: { exact: "environment" } }
-                });
-                handleStream(stream);
-            } catch (err) {
-                try {
-                    const fallbackStream = await navigator.mediaDevices.getUserMedia({ video: true });
-                    handleStream(fallbackStream);
-                } catch (e) {
-                    statusText.innerText = "Camera access denied or unavailable.";
-                    statusText.style.color = "#ff3333";
-                }
-            }
-        }
-
-        function handleStream(stream) {
-            video.srcObject = stream;
-            camBtn.style.display = "none";
-            statusText.innerText = "Scanning... Point at receipt";
-            statusText.style.color = "#00ffcc";
-            setInterval(scanFrame, 1000);
-        }
-
-        async function scanFrame() {
-            if (isProcessing || !video.videoWidth) return;
-            isProcessing = true;
-
-            const context = canvas.getContext('2d');
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            context.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-            const { data: { text } } = await worker.recognize(canvas);
-
-            parseText(text);
-            isProcessing = false;
-        }
-
-        function parseText(text) {
-            // 1. RECEIPT #: Matches # followed by 10 digits (#0000110968)
+function parseText(text) {
+            // 1. RECEIPT #: Matches # followed by 6-10 digits (#0000111022)
             const receiptMatch = text.match(/#\s*(\d{6,10})/);
 
             if (receiptMatch) {
@@ -123,33 +11,50 @@
                     return;
                 }
 
-                // 2. CUSTOMER NAME: Matches text directly after "SN#:" and a 6-character alphanumeric code
+                // 2. CUSTOMER NAME: Flexibly handles "SN#", "SNH", or "SN" followed by code, dashes, or colons
                 let customerName = "UNKNOWN";
                 
-                // Regex target: SN#: followed by 6 alphanumeric chars, then grabs the customer name word(s)
-                const snPattern = /SN#\s*[:.-]?\s*[A-Z0-9]{6}\s+([A-Za-z0-9\s]{3,20})/i;
+                // Matches "SNH:B08903 - CARLOS", "SN#:B08901 CARLOS", or "SN:B08903-CARLOS"
+                const snPattern = /(?:SN[#H]?|S\/N)\s*[:.-]?\s*[A-Z0-9]+\s*[-:\s]+\s*([A-Za-z\s]{3,20})/i;
                 const match = text.match(snPattern);
 
                 if (match && match[1]) {
                     customerName = match[1].trim();
                 } else {
-                    // Fallback: search for SN# with flexible spacing
-                    const broaderMatch = text.match(/SN#\s*[:.-]?\s*\S+\s+([A-Za-z\s]{3,20})/i);
-                    if (broaderMatch && broaderMatch[1]) {
-                        customerName = broaderMatch[1].trim();
+                    // Fallback: look for any name following a hyphen/dash after an alphanumeric code
+                    const dashMatch = text.match(/[A-Z0-9]{5,8}\s*-\s*([A-Za-z\s]{3,20})/i);
+                    if (dashMatch && dashMatch[1]) {
+                        customerName = dashMatch[1].trim();
                     }
                 }
 
-                // 3. AMOUNT: Matches numbers directly right of SUB-TOTAL
+                // 3. AMOUNT: Explicitly extracts from SUB-TOTAL to avoid grabbing unit prices
                 let amount = 0.00;
-                const subTotalMatch = text.match(/SUB-TOTAL\s*[:=]?\s*([\d,]+\.\d{2})/i);
+                
+                // Priority 1: Match line with SUB-TOTAL
+                const subTotalMatch = text.match(/SUB-?\s*TOTAL\s*[:=]?\s*([\d,]+\.\d{2})/i);
 
                 if (subTotalMatch && subTotalMatch[1]) {
                     amount = parseFloat(subTotalMatch[1].replace(',', ''));
                 } else {
+                    // Priority 2: Grab the right-most number on the SUB-TOTAL line if OCR splits it
+                    const lines = text.split('\n');
+                    for (let line of lines) {
+                        if (/SUB-?\s*TOTAL/i.test(line)) {
+                            const lineAmounts = line.match(/[\d,]+\.\d{2}/g);
+                            if (lineAmounts && lineAmounts.length > 0) {
+                                amount = parseFloat(lineAmounts[lineAmounts.length - 1].replace(',', ''));
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Fallback if SUB-TOTAL is missed completely: grab bottom-most decimal amount
+                if (amount === 0.00) {
                     const allAmounts = text.match(/[\d,]+\.\d{2}/g);
                     if (allAmounts && allAmounts.length > 0) {
-                        amount = parseFloat(allAmounts[0].replace(',', ''));
+                        amount = parseFloat(allAmounts[allAmounts.length - 1].replace(',', ''));
                     }
                 }
 
@@ -159,16 +64,7 @@
 
                 logData(receiptNo, customerName, amount);
 
-                statusText.innerText = `Scanned ${receiptNo}! Total for ${customerName}: ₱${customerBalances[customerName].toFixed(2)}`;
+                statusText.innerText = `Scanned ${receiptNo}! Total for ${customerName}: ₱${amount.toFixed(2)}`;
                 statusText.style.color = "#00ff00";
             }
         }
-
-        function logData(receiptNo, name, amount) {
-            const row = document.createElement('tr');
-            row.innerHTML = `<td>${receiptNo}</td><td>${name}</td><td>₱${amount.toFixed(2)}</td>`;
-            logBody.prepend(row);
-        }
-    </script>
-</body>
-</html>
