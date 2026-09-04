@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>In-Browser Receipt Scanner</title>
-    <!-- Load Tesseract.js directly from CDN -->
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <style>
         body { font-family: Arial, sans-serif; text-align: center; background: #121212; color: #fff; margin: 0; padding: 20px; }
@@ -33,7 +32,6 @@
 
     <div id="status">Click "Start Camera" to begin.</div>
 
-    <!-- Scanned Receipts Output -->
     <table id="log-table">
         <thead>
             <tr>
@@ -61,7 +59,6 @@
         let scannedReceipts = new Set();
         let customerBalances = {};
 
-        // 1. Initialize Tesseract.js Worker
         async function initOCR() {
             statusText.innerText = "Loading OCR Engine...";
             worker = await Tesseract.createWorker('eng');
@@ -69,7 +66,6 @@
         }
         initOCR();
 
-        // 2. Camera Access
         async function startCamera() {
             if (!worker) {
                 alert("OCR engine is still loading. Please wait a moment.");
@@ -96,10 +92,9 @@
             camBtn.style.display = "none";
             statusText.innerText = "Scanning... Point at receipt";
             statusText.style.color = "#00ffcc";
-            setInterval(scanFrame, 1000); // Process frame every 1 second
+            setInterval(scanFrame, 1000);
         }
 
-        // 3. Client-Side Image OCR Processing
         async function scanFrame() {
             if (isProcessing || !video.videoWidth) return;
             isProcessing = true;
@@ -115,77 +110,53 @@
             isProcessing = false;
         }
 
-        // 4. Extract Receipt #, Name (after SN#), and Amount
         function parseText(text) {
-            // Match Receipt # (# followed by digits or SN# / OR# / INV#)
-            const receiptMatch = text.match(/#\s*(\d{5,12})/) || 
-                                 text.match(/(?:SN|OR|INV|NO|RC PT)\s*[:#.]?\s*(\d{5,12})/i);
+            // 1. RECEIPT #: Matches # followed by 10 digits (#0000110968)
+            const receiptMatch = text.match(/#\s*(\d{6,10})/);
 
             if (receiptMatch) {
                 const receiptNo = receiptMatch[0];
 
-                // Prevent duplicate processing
                 if (scannedReceipts.has(receiptNo)) {
                     statusText.innerText = `Skipped Duplicate: ${receiptNo}`;
                     statusText.style.color = "#ffcc00";
                     return;
                 }
 
-                // --- CUSTOMER NAME EXTRACTION (Targeting name right after SN#) ---
+                // 2. CUSTOMER NAME: Matches text directly after "SN#:" and a 6-character alphanumeric code
                 let customerName = "UNKNOWN";
+                
+                // Regex target: SN#: followed by 6 alphanumeric chars, then grabs the customer name word(s)
+                const snPattern = /SN#\s*[:.-]?\s*[A-Z0-9]{6}\s+([A-Za-z0-9\s]{3,20})/i;
+                const match = text.match(snPattern);
 
-                // Pattern 1: Look for explicit labels (NAME, CUSTOMER, SOLD TO, CLIENT)
-                let nameMatch = text.match(/(?:NAME|CUSTOMER|SOLD TO|CLIENT)\s*[:.-]?\s*([A-Za-z\s]{3,25})/i);
-
-                if (nameMatch && nameMatch[1]) {
-                    customerName = nameMatch[1].trim();
+                if (match && match[1]) {
+                    customerName = match[1].trim();
                 } else {
-                    // Pattern 2: Look for line immediately following SN# or Receipt # line
-                    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-                    for (let i = 0; i < lines.length; i++) {
-                        if (/(?:SN|#|OR|INV|RECEIPT)/i.test(lines[i])) {
-                            // Check next 1-2 lines for pure text/customer name
-                            if (lines[i + 1] && /^[A-Za-z\s]{3,25}$/.test(lines[i + 1])) {
-                                customerName = lines[i + 1].trim();
-                                break;
-                            } else if (lines[i + 2] && /^[A-Za-z\s]{3,25}$/.test(lines[i + 2])) {
-                                customerName = lines[i + 2].trim();
-                                break;
-                            }
-                        }
-                    }
-
-                    // Pattern 3: Fallback - grab any prominent uppercase words block
-                    if (customerName === "UNKNOWN") {
-                        const wordMatch = text.match(/([A-Z\s]{4,20})\s+\d+\.\d{2}/);
-                        if (wordMatch) {
-                            customerName = wordMatch[1].trim();
-                        }
+                    // Fallback: search for SN# with flexible spacing
+                    const broaderMatch = text.match(/SN#\s*[:.-]?\s*\S+\s+([A-Za-z\s]{3,20})/i);
+                    if (broaderMatch && broaderMatch[1]) {
+                        customerName = broaderMatch[1].trim();
                     }
                 }
 
-                // --- TOTAL AMOUNT EXTRACTION ---
-                let totalMatch = text.match(/(?:TOTAL|AMOUNT|SUB-TOTAL|DUE|NET|PHP|₱)\s*[:=]?\s*([\d,]+\.\d{2})/i);
-                
-                if (!totalMatch) {
+                // 3. AMOUNT: Matches numbers directly right of SUB-TOTAL
+                let amount = 0.00;
+                const subTotalMatch = text.match(/SUB-TOTAL\s*[:=]?\s*([\d,]+\.\d{2})/i);
+
+                if (subTotalMatch && subTotalMatch[1]) {
+                    amount = parseFloat(subTotalMatch[1].replace(',', ''));
+                } else {
                     const allAmounts = text.match(/[\d,]+\.\d{2}/g);
                     if (allAmounts && allAmounts.length > 0) {
-                        totalMatch = [null, allAmounts[allAmounts.length - 1]];
+                        amount = parseFloat(allAmounts[0].replace(',', ''));
                     }
                 }
 
-                let amount = 0.00;
-                if (totalMatch) {
-                    amount = parseFloat(totalMatch[1].replace(',', ''));
-                }
-
-                // Mark receipt as processed
+                // Save scan and log balance
                 scannedReceipts.add(receiptNo);
-
-                // Cumulative Balance Tracking
                 customerBalances[customerName] = (customerBalances[customerName] || 0) + amount;
 
-                // Add Row to Screen
                 logData(receiptNo, customerName, amount);
 
                 statusText.innerText = `Scanned ${receiptNo}! Total for ${customerName}: ₱${customerBalances[customerName].toFixed(2)}`;
