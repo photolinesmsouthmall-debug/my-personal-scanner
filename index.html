@@ -91,9 +91,35 @@
             }
         }
 
-     function parseText(text) {
-            // 1. Extract Receipt Number (# followed by numbers)
-            const receiptMatch = text.match(/#\s*(\d{5,12})/) || text.match(/(?:OR|INV|NO|RC PT)\s*[:#.]?\s*(\d{5,12})/i);
+        function handleStream(stream) {
+            video.srcObject = stream;
+            camBtn.style.display = "none";
+            statusText.innerText = "Scanning... Point at receipt";
+            statusText.style.color = "#00ffcc";
+            setInterval(scanFrame, 1000); // Process frame every 1 second
+        }
+
+        // 3. Client-Side Image OCR Processing
+        async function scanFrame() {
+            if (isProcessing || !video.videoWidth) return;
+            isProcessing = true;
+
+            const context = canvas.getContext('2d');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            const { data: { text } } = await worker.recognize(canvas);
+
+            parseText(text);
+            isProcessing = false;
+        }
+
+        // 4. Extract Receipt #, Name (after SN#), and Amount
+        function parseText(text) {
+            // Match Receipt # (# followed by digits or SN# / OR# / INV#)
+            const receiptMatch = text.match(/#\s*(\d{5,12})/) || 
+                                 text.match(/(?:SN|OR|INV|NO|RC PT)\s*[:#.]?\s*(\d{5,12})/i);
 
             if (receiptMatch) {
                 const receiptNo = receiptMatch[0];
@@ -105,22 +131,42 @@
                     return;
                 }
 
-                // 2. Flexible Customer Name Extraction
-                // Pattern A: Look for explicit labels like "NAME:", "CUSTOMER:", "SOLD TO:"
+                // --- CUSTOMER NAME EXTRACTION (Targeting name right after SN#) ---
+                let customerName = "UNKNOWN";
+
+                // Pattern 1: Look for explicit labels (NAME, CUSTOMER, SOLD TO, CLIENT)
                 let nameMatch = text.match(/(?:NAME|CUSTOMER|SOLD TO|CLIENT)\s*[:.-]?\s*([A-Za-z\s]{3,25})/i);
-                
-                // Pattern B: Look for uppercase lines if explicit labels aren't printed
-                if (!nameMatch) {
-                    nameMatch = text.match(/([A-Z\s]{4,20})\s+\d+\.\d{2}/);
+
+                if (nameMatch && nameMatch[1]) {
+                    customerName = nameMatch[1].trim();
+                } else {
+                    // Pattern 2: Look for line immediately following SN# or Receipt # line
+                    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+                    for (let i = 0; i < lines.length; i++) {
+                        if (/(?:SN|#|OR|INV|RECEIPT)/i.test(lines[i])) {
+                            // Check next 1-2 lines for pure text/customer name
+                            if (lines[i + 1] && /^[A-Za-z\s]{3,25}$/.test(lines[i + 1])) {
+                                customerName = lines[i + 1].trim();
+                                break;
+                            } else if (lines[i + 2] && /^[A-Za-z\s]{3,25}$/.test(lines[i + 2])) {
+                                customerName = lines[i + 2].trim();
+                                break;
+                            }
+                        }
+                    }
+
+                    // Pattern 3: Fallback - grab any prominent uppercase words block
+                    if (customerName === "UNKNOWN") {
+                        const wordMatch = text.match(/([A-Z\s]{4,20})\s+\d+\.\d{2}/);
+                        if (wordMatch) {
+                            customerName = wordMatch[1].trim();
+                        }
+                    }
                 }
 
-                const customerName = nameMatch ? nameMatch[1].trim() : "UNKNOWN";
-
-                // 3. Flexible Amount Extraction
-                // Pattern A: Look for keywords like "TOTAL", "AMOUNT", "SUB-TOTAL", "DUE", "PHP", or "₱"
+                // --- TOTAL AMOUNT EXTRACTION ---
                 let totalMatch = text.match(/(?:TOTAL|AMOUNT|SUB-TOTAL|DUE|NET|PHP|₱)\s*[:=]?\s*([\d,]+\.\d{2})/i);
                 
-                // Pattern B: If no keyword, grab the bottom-most decimal amount on the receipt
                 if (!totalMatch) {
                     const allAmounts = text.match(/[\d,]+\.\d{2}/g);
                     if (allAmounts && allAmounts.length > 0) {
@@ -128,46 +174,6 @@
                     }
                 }
 
-                let amount = 0.00;
-                if (totalMatch) {
-                    amount = parseFloat(totalMatch[1].replace(',', ''));
-                }
-
-                // Mark receipt as processed
-                scannedReceipts.add(receiptNo);
-
-                // Cumulative Balance Tracking
-                customerBalances[customerName] = (customerBalances[customerName] || 0) + amount;
-
-                // Add Row to Screen
-                logData(receiptNo, customerName, amount);
-
-                statusText.innerText = `Scanned ${receiptNo}! Total for ${customerName}: ₱${customerBalances[customerName].toFixed(2)}`;
-                statusText.style.color = "#00ff00";
-            }
-        }
-
-        // 4. Extract Receipt #, Name, and Amount
-        function parseText(text) {
-            // Match Receipt # (#0000110968)
-            const receiptMatch = text.match(/#(\d{6,12})/);
-
-            if (receiptMatch) {
-                const receiptNo = receiptMatch[0];
-
-                // Prevent duplicate processing
-                if (scannedReceipts.has(receiptNo)) {
-                    statusText.innerText = `Skipped Duplicate: ${receiptNo}`;
-                    statusText.style.color = "#ffcc00";
-                    return;
-                }
-
-                // Match Customer Name (e.g., TRESMARIAS)
-                const nameMatch = text.match(/\d+\s+[A-Z0-9]+\s+([A-Z\s]{3,20})\s+\d+\.\d{2}/);
-                const customerName = nameMatch ? nameMatch[1].trim() : "UNKNOWN";
-
-                // Match Total Amount
-                const totalMatch = text.match(/(?:SUB-TOTAL|TOTAL)\s+([\d,]+\.\d{2})/i);
                 let amount = 0.00;
                 if (totalMatch) {
                     amount = parseFloat(totalMatch[1].replace(',', ''));
