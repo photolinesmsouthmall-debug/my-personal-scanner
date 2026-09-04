@@ -61,7 +61,6 @@
         let scannedReceipts = new Set();
         let customerBalances = {};
 
-        // 1. Initialize Tesseract.js Worker
         async function initOCR() {
             statusText.innerText = "Loading OCR Engine...";
             worker = await Tesseract.createWorker('eng');
@@ -69,7 +68,6 @@
         }
         initOCR();
 
-        // 2. Camera Access
         async function startCamera() {
             if (!worker) {
                 alert("OCR engine is still loading. Please wait a moment.");
@@ -96,10 +94,9 @@
             camBtn.style.display = "none";
             statusText.innerText = "Scanning... Point at receipt";
             statusText.style.color = "#00ffcc";
-            setInterval(scanFrame, 1000); // Process frame every 1 second
+            setInterval(scanFrame, 1000);
         }
 
-        // 3. Client-Side Image OCR Processing
         async function scanFrame() {
             if (isProcessing || !video.videoWidth) return;
             isProcessing = true;
@@ -115,48 +112,61 @@
             isProcessing = false;
         }
 
-        // 4. Extract Receipt #, Customer Name, and Sub-Total Amount
         function parseText(text) {
-            // 1. RECEIPT #: Matches # followed by 6-10 digits (#0000111022)
-            const receiptMatch = text.match(/#\s*(\d{6,10})/);
+            // 1. RECEIPT #: Fixes truncation by searching for 10-digit number streams starting with 000
+            // Catches both #0000111022 and plain 0000111022
+            let receiptNo = null;
+            const fullReceiptMatch = text.match(/#?\s*(000\d{7})/);
+            
+            if (fullReceiptMatch) {
+                receiptNo = "#" + fullReceiptMatch[1];
+            } else {
+                const altMatch = text.match(/#\s*(\d{6,10})/);
+                if (altMatch) receiptNo = altMatch[0];
+            }
 
-            if (receiptMatch) {
-                const receiptNo = receiptMatch[0];
-
+            if (receiptNo) {
                 if (scannedReceipts.has(receiptNo)) {
                     statusText.innerText = `Skipped Duplicate: ${receiptNo}`;
                     statusText.style.color = "#ffcc00";
                     return;
                 }
 
-                // 2. CUSTOMER NAME: Flexibly handles "SN#", "SNH", or "SN" followed by code, dashes, or colons
+                // 2. CUSTOMER NAME: Matches text after SN# / SNH / SN code (e.g. SN#:B08903 - CARLOS or SN#:B08901 TRESMARIAS)
                 let customerName = "UNKNOWN";
-                
-                // Matches "SNH:B08903 - CARLOS", "SN#:B08901 TRESMARIAS", or "SN:B08903-CARLOS"
-                const snPattern = /(?:SN[#H]?|S\/N)\s*[:.-]?\s*[A-Z0-9]+\s*[-:\s]+\s*([A-Za-z\s]{3,20})/i;
-                const match = text.match(snPattern);
 
-                if (match && match[1]) {
-                    customerName = match[1].trim();
-                } else {
-                    // Fallback: look for any name following a hyphen/dash after an alphanumeric code
-                    const dashMatch = text.match(/[A-Z0-9]{5,8}\s*-\s*([A-Za-z\s]{3,20})/i);
-                    if (dashMatch && dashMatch[1]) {
-                        customerName = dashMatch[1].trim();
+                // Strategy A: Target line containing "SN" and extract trailing name
+                const lines = text.split('\n');
+                for (let line of lines) {
+                    if (/SN/i.test(line)) {
+                        // Strip out SN labels, colons, numbers, codes, and trailing dashes
+                        let namePart = line.replace(/.*SN[#H:]?\s*[A-Z0-9]{5,8}\s*[-:\s]*/i, '').trim();
+                        // Clean non-alphabetical noise
+                        namePart = namePart.replace(/[^A-Za-z\s]/g, '').trim();
+                        
+                        if (namePart.length >= 3 && !/TOTAL|SUB|CASH|PRICE|AMOUNT/i.test(namePart)) {
+                            customerName = namePart;
+                            break;
+                        }
                     }
                 }
 
-                // 3. AMOUNT: Explicitly extracts from SUB-TOTAL to avoid grabbing unit prices
+                // Strategy B: Fallback regex if line splitting fails
+                if (customerName === "UNKNOWN") {
+                    const fallbackMatch = text.match(/(?:SN[#H]?|S\/N)\s*[:.-]?\s*[A-Z0-9]+\s*[-:\s]+\s*([A-Za-z\s]{3,20})/i);
+                    if (fallbackMatch && fallbackMatch[1]) {
+                        customerName = fallbackMatch[1].replace(/[^A-Za-z\s]/g, '').trim();
+                    }
+                }
+
+                // 3. AMOUNT: Locks strictly onto SUB-TOTAL
                 let amount = 0.00;
-                
-                // Priority 1: Match line with SUB-TOTAL
                 const subTotalMatch = text.match(/SUB-?\s*TOTAL\s*[:=]?\s*([\d,]+\.\d{2})/i);
 
                 if (subTotalMatch && subTotalMatch[1]) {
                     amount = parseFloat(subTotalMatch[1].replace(',', ''));
                 } else {
-                    // Priority 2: Grab the right-most number on the SUB-TOTAL line if OCR splits it
-                    const lines = text.split('\n');
+                    // Fallback to rightmost amount on the SUB-TOTAL line
                     for (let line of lines) {
                         if (/SUB-?\s*TOTAL/i.test(line)) {
                             const lineAmounts = line.match(/[\d,]+\.\d{2}/g);
@@ -168,7 +178,7 @@
                     }
                 }
 
-                // Fallback if SUB-TOTAL is missed completely: grab bottom-most decimal amount
+                // If SUB-TOTAL line was missed completely, take the bottom-most total
                 if (amount === 0.00) {
                     const allAmounts = text.match(/[\d,]+\.\d{2}/g);
                     if (allAmounts && allAmounts.length > 0) {
@@ -182,7 +192,7 @@
 
                 logData(receiptNo, customerName, amount);
 
-                statusText.innerText = `Scanned ${receiptNo}! Total for ${customerName}: ₱${customerBalances[customerName].toFixed(2)}`;
+                statusText.innerText = `Scanned ${receiptNo}! Total for ${customerName}: ₱${amount.toFixed(2)}`;
                 statusText.style.color = "#00ff00";
             }
         }
