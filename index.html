@@ -3,16 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>In-Browser Receipt Scanner</title>
-    <!-- Load Tesseract.js directly from CDN -->
+    <title>Receipt Scanner - GitHub CSV Storage</title>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <style>
         body { font-family: Arial, sans-serif; text-align: center; background: #121212; color: #fff; margin: 0; padding: 20px; }
         #video-container { position: relative; display: inline-block; width: 100%; max-width: 400px; margin-top: 10px; }
         video { width: 100%; border-radius: 12px; border: 3px solid #333; background: #000; }
         #overlay { position: absolute; top: 10%; left: 10%; width: 80%; height: 80%; border: 2px dashed #00ffcc; pointer-events: none; }
-        #status { font-size: 18px; font-weight: bold; margin-top: 15px; color: #00ffcc; }
+        #status { font-size: 16px; font-weight: bold; margin-top: 15px; color: #00ffcc; }
         .btn { padding: 12px 24px; font-size: 16px; background-color: #00ffcc; color: #121212; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 10px; }
+        .config-box { background: #1e1e1e; padding: 15px; border-radius: 8px; max-width: 400px; margin: 10px auto; text-align: left; }
+        .config-box input { width: 93%; padding: 8px; margin: 5px 0 10px 0; background: #2a2a2a; border: 1px solid #444; color: #fff; border-radius: 4px; }
         #log-table { width: 100%; max-width: 500px; margin: 20px auto; border-collapse: collapse; background: #1e1e1e; border-radius: 8px; overflow: hidden; }
         #log-table th, #log-table td { padding: 10px; border-bottom: 1px solid #333; text-align: left; font-size: 14px; }
         #log-table th { background: #2a2a2a; color: #00ffcc; }
@@ -20,8 +21,21 @@
 </head>
 <body>
 
-    <h2>Offline Receipt Scanner</h2>
-    <p>Runs entirely in your browser with zero server delay.</p>
+    <h2>Receipt Scanner</h2>
+
+    <!-- GitHub Storage Config -->
+    <div class="config-box">
+        <label>GitHub Username:</label>
+        <input type="text" id="gh-owner" placeholder="e.g. jondoe">
+        
+        <label>Repository Name:</label>
+        <input type="text" id="gh-repo" placeholder="receipt-scanner">
+        
+        <label>Personal Access Token (PAT):</label>
+        <input type="password" id="gh-token" placeholder="ghp_xxxxxxxxxxxx">
+        
+        <button class="btn" style="width:100%; padding:8px;" onclick="saveConfig()">Save GitHub Config</button>
+    </div>
 
     <div id="video-container">
         <video id="webcam" autoplay playsinline muted></video>
@@ -31,9 +45,8 @@
     <br>
     <button id="cam-btn" class="btn" onclick="startCamera()">Start Camera</button>
 
-    <div id="status">Click "Start Camera" to begin.</div>
+    <div id="status">Save settings above or start camera.</div>
 
-    <!-- Scanned Receipts Output -->
     <table id="log-table">
         <thead>
             <tr>
@@ -42,9 +55,7 @@
                 <th>Amount</th>
             </tr>
         </thead>
-        <tbody id="log-body">
-            <!-- Scanned records populate here -->
-        </tbody>
+        <tbody id="log-body"></tbody>
     </table>
 
     <canvas id="canvas" style="display:none;"></canvas>
@@ -59,7 +70,19 @@
         let isProcessing = false;
         let worker = null;
         let scannedReceipts = new Set();
-        let customerBalances = {};
+        let scannedDataList = [];
+
+        // Load credentials from LocalStorage
+        document.getElementById('gh-owner').value = localStorage.getItem('gh_owner') || '';
+        document.getElementById('gh-repo').value = localStorage.getItem('gh_repo') || '';
+        document.getElementById('gh-token').value = localStorage.getItem('gh_token') || '';
+
+        function saveConfig() {
+            localStorage.setItem('gh_owner', document.getElementById('gh-owner').value.trim());
+            localStorage.setItem('gh_repo', document.getElementById('gh-repo').value.trim());
+            localStorage.setItem('gh_token', document.getElementById('gh-token').value.trim());
+            alert('GitHub settings saved locally!');
+        }
 
         async function initOCR() {
             statusText.innerText = "Loading OCR Engine...";
@@ -69,22 +92,16 @@
         initOCR();
 
         async function startCamera() {
-            if (!worker) {
-                alert("OCR engine is still loading. Please wait a moment.");
-                return;
-            }
+            if (!worker) return alert("OCR engine is still loading.");
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: { exact: "environment" } }
-                });
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { exact: "environment" } } });
                 handleStream(stream);
             } catch (err) {
                 try {
-                    const fallbackStream = await navigator.mediaDevices.getUserMedia({ video: true });
-                    handleStream(fallbackStream);
+                    const fallback = await navigator.mediaDevices.getUserMedia({ video: true });
+                    handleStream(fallback);
                 } catch (e) {
-                    statusText.innerText = "Camera access denied or unavailable.";
-                    statusText.style.color = "#ff3333";
+                    statusText.innerText = "Camera access denied.";
                 }
             }
         }
@@ -92,8 +109,7 @@
         function handleStream(stream) {
             video.srcObject = stream;
             camBtn.style.display = "none";
-            statusText.innerText = "Scanning... Point at receipt";
-            statusText.style.color = "#00ffcc";
+            statusText.innerText = "Scanning... Point camera at receipt";
             setInterval(scanFrame, 1000);
         }
 
@@ -107,20 +123,16 @@
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
             const { data: { text } } = await worker.recognize(canvas);
-
             parseText(text);
             isProcessing = false;
         }
 
         function parseText(text) {
-            // 1. RECEIPT #: Fixes truncation by searching for 10-digit number streams starting with 000
-            // Catches both #0000111022 and plain 0000111022
+            // 1. Receipt # Detection (#0000110968 or 0000110968)
             let receiptNo = null;
-            const fullReceiptMatch = text.match(/#?\s*(000\d{7})/);
-            
-            if (fullReceiptMatch) {
-                receiptNo = "#" + fullReceiptMatch[1];
-            } else {
+            const fullMatch = text.match(/#?\s*(000\d{7})/);
+            if (fullMatch) receiptNo = "#" + fullMatch[1];
+            else {
                 const altMatch = text.match(/#\s*(\d{6,10})/);
                 if (altMatch) receiptNo = altMatch[0];
             }
@@ -128,72 +140,54 @@
             if (receiptNo) {
                 if (scannedReceipts.has(receiptNo)) {
                     statusText.innerText = `Skipped Duplicate: ${receiptNo}`;
-                    statusText.style.color = "#ffcc00";
                     return;
                 }
 
-                // 2. CUSTOMER NAME: Matches text after SN# / SNH / SN code (e.g. SN#:B08903 - CARLOS or SN#:B08901 TRESMARIAS)
+                // 2. Customer Name Detection (Handles SN#:808901 - TRESMARIAS)
                 let customerName = "UNKNOWN";
-
-                // Strategy A: Target line containing "SN" and extract trailing name
-                const lines = text.split('\n');
-                for (let line of lines) {
-                    if (/SN/i.test(line)) {
-                        // Strip out SN labels, colons, numbers, codes, and trailing dashes
-                        let namePart = line.replace(/.*SN[#H:]?\s*[A-Z0-9]{5,8}\s*[-:\s]*/i, '').trim();
-                        // Clean non-alphabetical noise
-                        namePart = namePart.replace(/[^A-Za-z\s]/g, '').trim();
-                        
-                        if (namePart.length >= 3 && !/TOTAL|SUB|CASH|PRICE|AMOUNT/i.test(namePart)) {
-                            customerName = namePart;
-                            break;
-                        }
-                    }
-                }
-
-                // Strategy B: Fallback regex if line splitting fails
-                if (customerName === "UNKNOWN") {
-                    const fallbackMatch = text.match(/(?:SN[#H]?|S\/N)\s*[:.-]?\s*[A-Z0-9]+\s*[-:\s]+\s*([A-Za-z\s]{3,20})/i);
-                    if (fallbackMatch && fallbackMatch[1]) {
-                        customerName = fallbackMatch[1].replace(/[^A-Za-z\s]/g, '').trim();
-                    }
-                }
-
-                // 3. AMOUNT: Locks strictly onto SUB-TOTAL
-                let amount = 0.00;
-                const subTotalMatch = text.match(/SUB-?\s*TOTAL\s*[:=]?\s*([\d,]+\.\d{2})/i);
-
-                if (subTotalMatch && subTotalMatch[1]) {
-                    amount = parseFloat(subTotalMatch[1].replace(',', ''));
+                const snMatch = text.match(/SN[#H:]?\s*[A-Z0-9]+\s*[-:\s]+\s*([A-Za-z\s]{3,20})/i);
+                if (snMatch && snMatch[1]) {
+                    customerName = snMatch[1].replace(/[^A-Za-z\s]/g, '').trim();
                 } else {
-                    // Fallback to rightmost amount on the SUB-TOTAL line
+                    const lines = text.split('\n');
                     for (let line of lines) {
-                        if (/SUB-?\s*TOTAL/i.test(line)) {
-                            const lineAmounts = line.match(/[\d,]+\.\d{2}/g);
-                            if (lineAmounts && lineAmounts.length > 0) {
-                                amount = parseFloat(lineAmounts[lineAmounts.length - 1].replace(',', ''));
+                        if (/SN/i.test(line)) {
+                            let namePart = line.replace(/.*SN[#H:]?\s*[A-Z0-9]{5,8}\s*[-:\s]*/i, '').trim();
+                            namePart = namePart.replace(/[^A-Za-z\s]/g, '').trim();
+                            if (namePart.length >= 3 && !/TOTAL|SUB|CASH|PRICE|AMOUNT/i.test(namePart)) {
+                                customerName = namePart;
                                 break;
                             }
                         }
                     }
                 }
 
-                // If SUB-TOTAL line was missed completely, take the bottom-most total
-                if (amount === 0.00) {
+                // 3. Amount Detection (SUB-TOTAL priority)
+                let amount = 0.00;
+                const subTotalMatch = text.match(/SUB-?\s*TOTAL\s*[:=]?\s*([\d,]+\.\d{2})/i);
+                if (subTotalMatch && subTotalMatch[1]) {
+                    amount = parseFloat(subTotalMatch[1].replace(',', ''));
+                } else {
                     const allAmounts = text.match(/[\d,]+\.\d{2}/g);
-                    if (allAmounts && allAmounts.length > 0) {
-                        amount = parseFloat(allAmounts[allAmounts.length - 1].replace(',', ''));
-                    }
+                    if (allAmounts && allAmounts.length > 0) amount = parseFloat(allAmounts[allAmounts.length - 1].replace(',', ''));
                 }
 
-                // Save scan and log balance
                 scannedReceipts.add(receiptNo);
-                customerBalances[customerName] = (customerBalances[customerName] || 0) + amount;
+                
+                const record = {
+                    timestamp: new Date().toLocaleString(),
+                    receiptNo: receiptNo,
+                    customerName: customerName,
+                    amount: amount
+                };
 
+                scannedDataList.push(record);
                 logData(receiptNo, customerName, amount);
+                
+                statusText.innerText = `Scanned ${receiptNo}! Saving to GitHub CSV...`;
+                statusText.style.color = "#00ffcc";
 
-                statusText.innerText = `Scanned ${receiptNo}! Total for ${customerName}: ₱${amount.toFixed(2)}`;
-                statusText.style.color = "#00ff00";
+                saveToGitHubCSV(scannedDataList);
             }
         }
 
@@ -201,6 +195,62 @@
             const row = document.createElement('tr');
             row.innerHTML = `<td>${receiptNo}</td><td>${name}</td><td>₱${amount.toFixed(2)}</td>`;
             logBody.prepend(row);
+        }
+
+        // --- GITHUB CSV STORAGE INTEGRATION ---
+        async function saveToGitHubCSV(dataList) {
+            const owner = localStorage.getItem('gh_owner');
+            const repo = localStorage.getItem('gh_repo');
+            const token = localStorage.getItem('gh_token');
+
+            if (!owner || !repo || !token) {
+                statusText.innerText = "Please enter and save your GitHub credentials above!";
+                statusText.style.color = "#ffcc00";
+                return;
+            }
+
+            // Convert array of objects to Excel-ready CSV format
+            let csvContent = "Timestamp,Receipt No,Customer Name,Amount\n";
+            dataList.forEach(row => {
+                csvContent += `"${row.timestamp}","${row.receiptNo}","${row.customerName}","${row.amount}"\n`;
+            });
+
+            const path = 'scanned_receipts.csv';
+            const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
+            const encodedContent = btoa(unescape(encodeURIComponent(csvContent)));
+
+            try {
+                let sha = null;
+                const getRes = await fetch(url, { headers: { 'Authorization': `token ${token}` } });
+                if (getRes.ok) {
+                    const fileData = await getRes.json();
+                    sha = fileData.sha;
+                }
+
+                const putRes = await fetch(url, {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': `token ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        message: `Update scanned receipts CSV [${new Date().toLocaleTimeString()}]`,
+                        content: encodedContent,
+                        sha: sha
+                    })
+                });
+
+                if (putRes.ok) {
+                    statusText.innerText = `Saved ${dataList[dataList.length - 1].receiptNo} to scanned_receipts.csv in GitHub!`;
+                    statusText.style.color = "#00ff00";
+                } else {
+                    statusText.innerText = "GitHub save failed. Verify your token permissions.";
+                    statusText.style.color = "#ff3333";
+                }
+            } catch (err) {
+                console.error("GitHub CSV sync failed:", err);
+                statusText.innerText = "Network error while saving to GitHub.";
+            }
         }
     </script>
 </body>
